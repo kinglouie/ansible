@@ -1,9 +1,8 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-# Copyright (c) 2018 - Etienne Desautels <etienne.desautels@gmail.com>
 # Copyright (c) 2018 - Matthias Hollerbach <mail@matthias-hollerbach.de>
-# Copyright (c) 2016 - John Calixto <john.calixto@nordstrom.com> and Nordstrom, Inc.
+# Copyright (c) 2018 - Etienne Desautels <etienne.desautels@gmail.com>
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
 from __future__ import absolute_import, division, print_function
@@ -20,9 +19,8 @@ DOCUMENTATION = '''
 ---
 module: macos_pref
 author:
-    - Etienne Desautels (@etienned)
     - Matthias Hollerbach (@kinglouie)
-    - John Calixto (@nordjc)
+    - Etienne Desautels (@etienned)
 short_description: Manipulates macOS preferences including complex data types
 version_added: "2.6"
 description:
@@ -34,7 +32,8 @@ description:
       keys without having to assign unchanged peer or parent values.
 requirements:
     - Target machine should be running macOS
-    - PyObjC (preinstalled by Apple with the operating system since macOS 10.5 Leopard)
+    - PyObjc python module (preinstalled when using system python since macOS 10.5 Leopard).
+      When using python 3 you have to install PyObjc manually.
 options:
     domain:
         description:
@@ -43,7 +42,10 @@ options:
         default: NSGlobalDomain
     user:
         description:
-            - The user on which the preference should apply.
+            - The user on which the preference will be applied.
+              C(anyUser) will set the preference for all users on the machine.
+            - See U(https://developer.apple.com/library/content/documentation/CoreFoundation/Conceptual/CFPreferences/Concepts/PreferenceDomains.html)
+              for further information.
         required: false
         default: currentUser
         choices: ["anyUser", "currentUser"]
@@ -58,46 +60,39 @@ options:
         choices: ["anyHost", "currentHost"]
     key:
         description:
-            - The preference key.
-        required: true
+            - The key of the preference. Nested values can be accessed by giving all
+              keys and indexes separated by colons (:). Indexes are zero-based
+              (see Notes for special cases).
+        required: false
     type:
         description:
             - The type of the value to write. If unspecified, I(type) will
-              be deduce mostly the same way YAML cast type (see Notes for special cases).
+              be deduced mostly the same way YAML casts types (see Notes for special cases).
         default: null
         choices: ["array", "bool", "boolean", "data", "date", "dict", "float", "real", "int", "integer", "string"]
-    array_add:
-        description:
-            - Add new elements to the array for a key which has an array as its value.
-        default: false
-        choices: ["true", "false"]
-    dict_merge:
-        description:
-            - Performs a deep merge of nested dictionaries instead of replacing the dictionary.
-        default: false
-        choices: ["true", "false"]
     value:
         description:
-            - The value that will be set for the specified key. 
-              If value is omitted the preference value of C(key) will be returned.
+            - The value that will be set for the specified key.
+              If C(value) is omitted and C(state) is not C(absent), the preference value of C(key) will be returned.
         required: false
     state:
         description:
             - The state of the preference.
-        default: present
-        choices: ["present", "absent"]
+              c(merge) performs a deep merge of dictionaries and arrays.
+        default: repace
+        choices: ["replace", "merge", "absent"]
 notes:
     - macOS caches preferences aggressively. This module should take care of
       updating caches but in some cases you may need to logout and login to
       apply the changes.
     - Check mode can be use with this module.
     - Nested keys need to be quoted when use in abbreviated form
-      (because they contains colons and that mess with the syntax).
-    - All dates need to be quoted.
+      (because they contains colons and that messes with the syntax).
+    - Dates need to be quoted.
     - First level (not nested) quoted boolean, integers and floats are
-      converted to boolean, integer and float unless type is specified.
-    - List and dict can't be given as value in key=argument form.
-    - Binary data need to be encoded in base64.
+      converted to boolean, integer and float unless C(type) is specified.
+    - Lists and dicts can't be given as C(value) in C(key=argument) form.
+    - Binary data needs to be encoded in base64.
 '''
 
 EXAMPLES = '''
@@ -145,16 +140,15 @@ EXAMPLES = '''
 - name: Set desktop and finder icon view settings
   macos_pref:
     domain: com.apple.finder
-    key: FK_StandardViewSettings
+    key: FK_StandardViewSettings:IconViewSettings
     value:
-      IconViewSettings:
-        arrangeBy: name
-        gridSpacing: 44
-        iconSize: 36
-        showIconPreview: true
-        showItemInfo: false
-        labelOnBottom: true
-        textSize: 12
+      arrangeBy: name
+      gridSpacing: 44
+      iconSize: 36
+      showIconPreview: true
+      showItemInfo: false
+      labelOnBottom: true
+      textSize: 12
 
 
 # Set (merge) a dictionary key
@@ -207,6 +201,23 @@ EXAMPLES = '''
       displayName: Flurry
       path: /System/Library/Screen Savers/Flurry.saver
       type: 0
+
+
+# Set the nested key arrangeBy in abbreviated form (nested keys need to be quoted).
+- macos_pref: { domain: com.apple.finder, key: 'DesktopViewSettings:IconViewSettings:arrangeBy', value: dateModified }
+
+
+# Set ListViewSettings key to complex nested values.
+- macos_pref:
+    domain: com.apple.finder
+    key: ComputerViewSettings:ListViewSettings
+    value:
+      iconSize: 16
+      sortColumn: name
+        - textSize: 12
+        - columns:
+            - comments:
+                - ascending: true
 '''
 
 RETURN = '''
@@ -214,9 +225,8 @@ value:
     description: The value associated with the preference domain and key.
                  Return type is a python object that maps closest to the data type of the macOS preference.
                  This can be an integer, float, string, dict, list, etc...
-                 In case the preference was changed, the new value of C(key) will be returned.
     type: string
-    returned: on success
+    returned: when C(state) is not C(absent) and C(value) is not given
     sample: "{'CustomViewStyleVersion': 1}"
 '''
 
@@ -229,18 +239,13 @@ import datetime
 import os
 import re
 import string
-import sys
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible.module_utils.six import integer_types, string_types, binary_type, text_type
 
-# Ensure that we have access to the pyobjc libraries that Apple ships with
-# macOS (e.g. even when using brew-installed python)
 try:
-    sys.path.insert(0, '/System/Library/Frameworks/Python.framework/Versions/2.7/Extras/lib/python/PyObjc')
     import CoreFoundation
     import Foundation
-    from PyObjCTools.Conversion import pythonCollectionFromPropertyList
 except ImportError:
     pyobjc_found = False
 else:
@@ -248,7 +253,7 @@ else:
 
 
 # Regular expression that match datetime formats. Should match mostly the
-# same formats that YAML support.
+# same formats that YAML supports.
 RE_DATETIME = re.compile(r"""
     # year-month-day
     (?P<year>\d{4})-(?P<month>[0-1]?[0-9])-(?P<day>[0-3]?[0-9])
@@ -358,9 +363,9 @@ def equivalent_types(value1, value2):
 class Data(binary_type):
     """
     Object representing binary data.
-    Instance should be initialize with binary data encoded in base64 codec.
+    Instance should be initialized with binary data encoded in base64 codec.
     """
-    # List of all Base64 accepted characters.
+    # List of all base64 characters.
     BASE64_CHARS = string.ascii_letters + string.digits + '+/='
 
     # List of all text characters.
@@ -379,7 +384,7 @@ class Data(binary_type):
 
         # Check if data is a valid base64 string. Short strings are not
         # considered as binary.
-        if isinstance(data, binary_type) and len(data) > 51 and not data.translate(None, cls.BASE64_CHARS):
+        if isinstance(data, binary_type) and len(data) > 51 and not data.decode().translate({ord(c): None for c in cls.BASE64_CHARS}):
             try:
                 binary_data = b64decode(data)
             except TypeError:
@@ -393,13 +398,13 @@ class Data(binary_type):
     @classmethod
     def is_binary(cls, data):
         """ Check if data looks like binary data and not textual data. """
-        if '\x00' in data:
+        if b'\x00' in data:
             return True
         # Check only first 512 characters.
         data = data[:512]
         # If more than 30% are non-text characters, then this is considered
         # binary data.
-        return len(data.translate(None, cls.TEXT_CHARS)) / float(len(data)) > 0.3
+        return len(data.translate({ord(c): None for c in cls.TEXT_CHARS})) / float(len(data)) > .3
 
     @property
     def binary(self):
@@ -449,7 +454,7 @@ class CFPreferences(object):
             domain = Foundation.kCFPreferencesAnyApplication
         self._domain = domain
 
-    def read(self, key):
+    def read(self, key_string):
         """
         Read a preference value for the specified key. Nested values can be
         access by giving all keys and indexes, separated by colons (:).
@@ -463,28 +468,28 @@ class CFPreferences(object):
         # Can't pass an array index to CFPreferencesCopyAppValue,
         # we could probably read the entire plist in this case.
 
-        keys_n_idxs = self._split_keys_n_idxs(key)
+        keys = self._split_keys(key_string)
         # Get value/structure of the first level key.
         if self._is_current_app_and_user():
             value = CoreFoundation.CFPreferencesCopyAppValue(
-                keys_n_idxs[0], self.domain
+                keys[0], self.domain
             )
         else:
             value = CoreFoundation.CFPreferencesCopyValue(
-                keys_n_idxs[0], self.domain, self.user, self.host
+                keys[0], self.domain, self.user, self.host
             )
         # If there's more then one key level, follow the structure until the
         # last level is reach or return None if some substructures are missing.
-        for key_or_idx in keys_n_idxs[1:]:
+        for key in keys[1:]:
             try:
-                value = value[key_or_idx]
+                value = value[key]
             except (KeyError, IndexError, TypeError, ValueError):
                 return None
 
-        value = self._normalize_to_python(value)
+        value = self._cf_to_py(value)
         return value
 
-    def write(self, key, value, array_add=False, dict_merge=False):
+    def write(self, key_string, value, merge=False):
         """
         Write a preference value for the specified key. Nested values can be
         written by giving all keys and indexes separated by colons (:).
@@ -501,102 +506,65 @@ class CFPreferences(object):
         Item will be appended to the current array and list will extend
         current array.
         """
-        keys_n_idxs = self._split_keys_n_idxs(key)
-        root = node = self._get_tree(keys_n_idxs)
+        keys = self._split_keys(key_string)
+        last_key = keys[-1]
+        root = node = self._get_tree(keys)
 
-        # Add list and dict that are missing.
-        for key_or_idx, next_key_or_idx in zip(keys_n_idxs, keys_n_idxs[1:]):
-            self._validate_key_node(key_or_idx, node)
+        # Add lists and dicts that are missing.
+        for key, next_key in zip(keys, keys[1:]):
+            self._validate_key_node(key, node)
 
             # Add missing list and dict.
             if isinstance(node, list):
-                if key_or_idx > len(node):
+                if key > len(node):
                     raise IndexError(
                         'Index {0} in key `{1}` out of range.'
-                        .format(key_or_idx, key)
+                        .format(key, key)
                     )
-                if key_or_idx == len(node):
-                    node.append([] if isinstance(next_key_or_idx, int) else {})
-            elif key_or_idx not in node:
-                node[key_or_idx] = [] if isinstance(next_key_or_idx, int) else {}
+                if key == len(node):
+                    node.append([] if isinstance(next_key, int) else {})
+            elif key not in node:
+                node[key] = [] if isinstance(next_key, int) else {}
 
-            node = node[key_or_idx]
+            node = node[key]
+        self._validate_key_node(last_key, node)
 
-        # Set final value.
-        last_key_or_idx = keys_n_idxs[-1]
-        self._validate_key_node(last_key_or_idx, node)
-
-        if array_add:
-            if isinstance(node, list):
-                # If index doesn't exist, raise error except if it's the next one.
-                if last_key_or_idx > len(node):
-                    raise IndexError(
-                        'Index {0} in key `{1}` out of range.'
-                        .format(last_key_or_idx, key)
-                    )
-                if last_key_or_idx == len(node):
-                    node.append([])
-            else:  # it's a dict.
-                if last_key_or_idx not in node:
-                    node[last_key_or_idx] = []
-
-            if not isinstance(node[last_key_or_idx], list):
+        # If index doesn't exist, raise error except if it's the next one.
+        if isinstance(node, list) and last_key > len(node):
+            raise IndexError(
+                'Index {0} in key `{1}` out of range.'
+                .format(last_key, key)
+            )
+        # Value is present.
+        if (
+            (isinstance(node, list) and last_key < len(node))
+            or (not isinstance(node, list) and last_key in node)
+        ):
+            if not equivalent_types(node[last_key], value):
                 raise TypeError(
-                    "With array_add end node should be a list and it's not."
+                    'New value type does not match current value type for key '
+                    '{0} ({1!r} {2} -> {3!r} {4}).'
+                    .format(
+                        last_key, value, type(value),
+                        node[last_key], type(node[last_key])
+                    )
                 )
-            # Add only items that are not already present in the current list,
-            # and preserve order.
-            items_to_add = [
-                item for item in value if item not in node[last_key_or_idx]
-            ]
-            node[last_key_or_idx].extend(items_to_add)
-
-        elif isinstance(node, list):
-            # If index doesn't exist, raise error except if it's the next one.
-            if last_key_or_idx > len(node):
-                raise IndexError(
-                    'Index {0} in key `{1}` out of range.'
-                    .format(last_key_or_idx, key)
-                )
-            if last_key_or_idx == len(node):
-                node.append(value)
-            elif equivalent_types(node[last_key_or_idx], value):
-                node[last_key_or_idx] = value
+            if merge:
+                self._deep_merge(node[last_key], value)
             else:
-                raise TypeError(
-                    'New value type does not match current value type for key '
-                    '{0} ({1!r} {2} -> {3!r} {4}).'
-                    .format(
-                        last_key_or_idx, value, type(value),
-                        node[last_key_or_idx], type(node[last_key_or_idx])
-                    )
-                )
-
-        else:  # it's a dict.
-            if (last_key_or_idx in node and not
-                    equivalent_types(node[last_key_or_idx], value)):
-                raise TypeError(
-                    'New value type does not match current value type for key '
-                    '{0} ({1!r} {2} -> {3!r} {4}).'
-                    .format(
-                        last_key_or_idx, value, type(value),
-                        node[last_key_or_idx], type(node[last_key_or_idx])
-                    )
-                )
-            node[last_key_or_idx] = value
-
-        value = root[keys_n_idxs[0]]
-
-        # Deep merge dicts.
-        current_value = self.read(key)
-        if dict_merge and isinstance(current_value, collections.MutableMapping):
-            new = copy.deepcopy(current_value)
-            self._deep_merge_dicts(new, value)
+                node[last_key] = value
+        # Value not present.
         else:
-            new = value
+            # Handle array.
+            if isinstance(node, list):
+                node.append(value)
+            # Handle dict.
+            else:
+                node[last_key] = value
 
         # Update the plist.
-        self._set_plist(keys_n_idxs[0], new)
+        value = root[keys[0]]
+        self._set_plist(keys[0], value)
 
     def delete(self, key):
         """
@@ -611,33 +579,33 @@ class CFPreferences(object):
 
         If the key doesn't exists this function return None.
         """
-        keys_n_idxs = self._split_keys_n_idxs(key)
-        root = node = self._get_tree(keys_n_idxs)
+        keys = self._split_keys(key)
+        root = node = self._get_tree(keys)
 
-        for key_or_idx in keys_n_idxs[:-1]:
+        for key in keys[:-1]:
             try:
-                node = node[key_or_idx]
+                node = node[key]
             except (IndexError, KeyError, TypeError, ValueError):
                 # That means there's nothing to delete.
                 return
 
-        last_key_or_idx = keys_n_idxs[-1]
-        key_or_idx_type = list if isinstance(last_key_or_idx, int) else dict
-        if not isinstance(node, key_or_idx_type):
+        last_key = keys[-1]
+        key_type = list if isinstance(last_key, int) else dict
+        if not isinstance(node, key_type):
             # That means there's nothing to delete.
             return
 
         if isinstance(node, list):
-            if last_key_or_idx < len(node):
-                node.pop(last_key_or_idx)
-        elif last_key_or_idx in node:
-            del node[last_key_or_idx]
+            if last_key < len(node):
+                node.pop(last_key)
+        elif last_key in node:
+            del node[last_key]
 
         # Update the plist.
-        value = root.get(keys_n_idxs[0])
-        self._set_plist(keys_n_idxs[0], value)
+        value = root.get(keys[0])
+        self._set_plist(keys[0], value)
 
-    def _deep_merge_dicts(self, base, incoming):
+    def _deep_merge(self, base, incoming):
         """
         Performs an *in-place* deep-merge of key-values from :attr:`incoming`
         into :attr:`base`. No attempt is made to preserve the original state of
@@ -650,47 +618,57 @@ class CFPreferences(object):
         :type incoming:  Any :class:`dict`-like object
         :rtype:  None
         """
-        for ki, vi in incoming.items():
-            if (
-                ki in base
-                and isinstance(vi, collections.MutableMapping)
-                and isinstance(base[ki], collections.MutableMapping)
-            ):
-                self._deep_merge_dicts(base[ki], vi)
-            else:
-                base[ki] = vi
+        # Merge array.
+        if isinstance(base, list):
+            items_to_add = [
+                item for item in incoming if item not in base
+            ]
+            base.extend(items_to_add)
+        # Merge dict.
+        else:
+            for key, val in incoming.items():
+                if (
+                    key in base
+                    and ((isinstance(val, collections.MutableMapping)
+                            and isinstance(base[key], collections.MutableMapping))
+                        or (isinstance(val, list)
+                            and isinstance(base[key], list)))
+                ):
+                    self._deep_merge(base[key], val)
+                else:
+                    base[key] = val
 
-    def _normalize_to_python(self, value):
+    def _cf_to_py(self, value):
         """
-        Return value with all Foundation types converted to their python
+        Return value with all CoreFoundation types converted to their python
         equivalent.
         """
         if isinstance(value, (Foundation.NSMutableDictionary, dict)):
             value = dict(value)
             for key, item in value.items():
-                value[key] = self._normalize_to_python(item)
+                value[key] = self._cf_to_py(item)
         elif isinstance(value, (Foundation.NSMutableArray, list, tuple)):
-            value = [self._normalize_to_python(item) for item in value]
+            value = [self._cf_to_py(item) for item in value]
         elif isinstance(value, Foundation.NSDate):
             value = string_to_datetime(text_type(value))
         elif isinstance(value, Foundation.NSMutableData):
             value = Data(value.base64Encoding())
         return value
 
-    def _normalize_to_cf(self, value):
+    def _py_to_cf(self, value):
         """
         Return value with all python datetime and Data objects converted
         to their CoreFoundation equivalent. Python strings are converted
         to unicode.
 
         If value contains a type not supported by the .plist format,
-        a TypeError will be raise.
+        a TypeError will be raised.
         """
         if isinstance(value, dict):
             for key, item in value.items():
-                value[key] = self._normalize_to_cf(item)
+                value[key] = self._py_to_cf(item)
         elif isinstance(value, (list, tuple)):
-            value = [self._normalize_to_cf(item) for item in value]
+            value = [self._py_to_cf(item) for item in value]
         elif isinstance(value, datetime.datetime):
             value = self._datetime_to_cfdate(value)
         elif isinstance(value, Data):
@@ -746,50 +724,50 @@ class CFPreferences(object):
 
         return cfdate
 
-    def _split_keys_n_idxs(self, key_string):
+    def _split_keys(self, key_string):
         """ Split key string in a list of keys and indexes (as int). """
         if not isinstance(key_string, string_types):
             raise TypeError('Key should be a string. {0} {1}'.format(repr(key_string), type(key_string)))
 
-        keys_n_idxs = [
-            int(key_or_idx) if key_or_idx.isdigit() else key_or_idx
-            for key_or_idx in key_string.strip(':').split(':')
+        keys = [
+            int(key) if key.isdigit() else key
+            for key in key_string.strip(':').split(':')
         ]
 
         # Be sure first key is a string. If not, that can trigger
         # a "Trace/BPT trap" crash.
-        if not isinstance(keys_n_idxs[0], string_types):
+        if not isinstance(keys[0], string_types):
             raise TypeError('First key should be a string.')
 
-        return keys_n_idxs
+        return keys
 
     def _is_current_app_and_user(self):
         return (self.domain != Foundation.kCFPreferencesAnyApplication and
                 self.user != Foundation.kCFPreferencesAnyUser and
                 self.host == Foundation.kCFPreferencesAnyHost)
 
-    def _get_tree(self, keys_n_idxs):
+    def _get_tree(self, keys):
         """
         Return the tree that contains all the keys and indexes from the .plist.
         """
         root = {}
-        tree = self.read(keys_n_idxs[0])
+        tree = self.read(keys[0])
         if tree is not None:
-            root[keys_n_idxs[0]] = tree
+            root[keys[0]] = tree
         return root
 
-    def _validate_key_node(self, key_or_idx, node):
-        key_or_idx_type = list if isinstance(key_or_idx, int) else dict
-        if not isinstance(node, key_or_idx_type):
+    def _validate_key_node(self, key, node):
+        key_type = list if isinstance(key, int) else dict
+        if not isinstance(node, key_type):
             raise TypeError(
                 'Type mismatch between the key `{0}` and the node `{1}` '
                 '({2} -> {3}).'
-                .format(key_or_idx, repr(node), key_or_idx_type, type(node))
+                .format(key, repr(node), key_type, type(node))
             )
 
     def _set_plist(self, key, value):
         """ Save the value for the key to the .plist and update the cache. """
-        value = self._normalize_to_cf(value)
+        value = self._py_to_cf(value)
 
         if self._is_current_app_and_user():
             CoreFoundation.CFPreferencesSetAppValue(key, value, self.domain)
@@ -819,26 +797,29 @@ class MacOSPrefException(Exception):
 
 
 class MacOSPref(object):
-    def __init__(self, domain, user, host, array_add, dict_merge, key, type, value, state, check_mode):
+    def __init__(self, domain, user, host, key, type, value, state, check_mode):
 
         try:
             self.prefs = CFPreferences(domain=domain, user=user, host=host)
         except Exception as e:
             raise MacOSPrefException(e.args[0])
 
-        self.array_add = array_add
-        self.dict_merge = dict_merge
         self.key = key
         self.type = type
         self.value = value
         self.state = state
         self.check_mode = check_mode
+        if state == 'merge':
+            self.merge = True
+        else:
+            self.merge = False
 
         # Set initial var values
         self.current_value = None
         self.changed = False
         self.success = True
         self.return_value = None
+        self.should_return_value = True
 
     def _auto_cast_type(self, value, first_level=True):
         """
@@ -848,7 +829,7 @@ class MacOSPref(object):
         string (but in nested structure, integers and floats keep their type).
 
         Date strings are always cast to datetime objects because dates are
-        always given as string (Because JSON do not support datetime type).
+        always given as string (Because JSON does not support datetime type).
 
         Binary data encoded in base64 is always converted to Data object.
 
@@ -886,7 +867,7 @@ class MacOSPref(object):
                 try:
                     return value.decode('utf-8')
                 except UnicodeDecodeError:
-                    raise OSXDefaultsException('String is not valid UTF-8.')
+                    raise MacOSPrefException('String is not valid UTF-8.')
         elif isinstance(value, list):
             return [self._auto_cast_type(item, False) for item in value]
         elif isinstance(value, dict):
@@ -926,14 +907,14 @@ class MacOSPref(object):
         try:
             given_type = supported_types[given_type]
         except KeyError:
-            raise OSXDefaultsException(
+            raise MacOSPrefException(
                 'Unsupported type specified: <{0}>'.format(given_type)
             )
         if isinstance(value, binary_type):
             try:
                 value = value.decode('utf-8')
             except UnicodeDecodeError:
-                raise OSXDefaultsException('String is not valid UTF-8.')
+                raise MacOSPrefException('String is not valid UTF-8.')
 
         if isinstance(value, given_type):
             if given_type in (list, dict):
@@ -951,7 +932,7 @@ class MacOSPref(object):
                 try:
                     return string_to_datetime(value)
                 except ValueError:
-                    raise OSXDefaultsException(
+                    raise MacOSPrefException(
                         'Invalid date value: {0}. Required format '
                         'yyyy-mm-dd hh:mm:ss (or with Timezone).'.format(repr(value)))
             else:
@@ -961,7 +942,7 @@ class MacOSPref(object):
                     # Let the final error raise.
                     pass
 
-        raise OSXDefaultsException(
+        raise MacOSPrefException(
             "Can't convert value `{0}` of {1} to {2}."
             .format(repr(value), type(value), given_type)
         )
@@ -973,6 +954,7 @@ class MacOSPref(object):
 
         # Delete the key if state is "absent"
         if self.state == "absent":
+            self.should_return_value = False
             if self.current_value is None:
                 return
 
@@ -984,53 +966,60 @@ class MacOSPref(object):
 
             self.prefs.delete(self.key)
 
-        # Cast value type before comparing and writing.
-        if self.type:
-            self.value = self._cast_type(self.value, self.type)
-        else:
-            self.value = self._auto_cast_type(self.value)
+        # Write if value is present
+        if self.value:
+            self.should_return_value = False
+            # Cast value type before comparing and writing.
+            if self.type:
+                self.value = self._cast_type(self.value, self.type)
+            else:
+                self.value = self._auto_cast_type(self.value)
 
-        # For array_add, convert single item to a list.
-        if self.array_add and not isinstance(self.value, list):
-            self.value = [self.value]
+            # For state=merge, when base is array convert single item to a list.
+            if self.merge and isinstance(self.current_value, list) and not isinstance(self.value, list):
+                self.value = [self.value]
 
-        # Check if there's a type mismatch.
-        if (self.current_value is not None and
-                not equivalent_types(self.current_value, self.value)):
-            raise MacOSPrefException(
-                'New value type does not match current value type for key '
-                '{0} ({1!r} {2} -> {3!r} {4}).'
-                .format(
-                    self.key, self.value, type(self.value),
-                    self.current_value, type(self.current_value)
-                )
-            )
-
-        # When array_add, check if all values to add are already there.
-        if self.array_add:
-            if self.current_value is not None:
-                if not isinstance(self.current_value, list):
-                    raise MacOSPrefException(
-                        'With array_add current value at key needs to be an array '
-                        'but it\'s {0}.'.format(type(self.current_value))
+            # Check if there's a type mismatch.
+            if (self.current_value is not None and
+                    not equivalent_types(self.current_value, self.value)):
+                raise MacOSPrefException(
+                    'New value type does not match current value type for key '
+                    '{0} ({1!r} {2} -> {3!r} {4}).'
+                    .format(
+                        self.key, self.value, type(self.value),
+                        self.current_value, type(self.current_value)
                     )
-                new_items = [
-                    item for item in self.value
-                    if item not in self.current_value
-                ]
-                if not new_items:
-                    return
+                )
 
-        elif self.current_value == self.value:
-            return
+            # Check for changes and abort if ther are none
+            if self.merge:
+                if self.current_value is not None:
+                    # compare arrays
+                    if isinstance(self.current_value, list):
+                        new_items = [
+                            item for item in self.value
+                            if item not in self.current_value
+                        ]
+                        if not new_items:
+                            return
+                    # compare dicts
+                    else:
+                        new_items = [
+                            key for key, val in self.value.items()
+                            if key not in self.current_value
+                        ]
+                        if not new_items:
+                            return
+            elif self.current_value == self.value:
+                return
 
-        self.changed = True
+            self.changed = True
 
-        if self.check_mode:
-            return
+            if self.check_mode:
+                return
 
-        # Change/Create/Set given key/value for domain in defaults.
-        self.prefs.write(self.key, self.value, self.array_add, self.dict_merge)
+            # Change/Create/Set given key/value for domain in defaults.
+            self.prefs.write(self.key, self.value, self.merge)
 
 
 def main():
@@ -1055,16 +1044,6 @@ def main():
                     'anyHost',
                     'currentHost'
                 ],
-                required=False
-            ),
-            array_add=dict(
-                default=False,
-                type='bool',
-                required=False
-            ),
-            dict_merge=dict(
-                default=False,
-                type='bool',
                 required=False
             ),
             key=dict(
@@ -1092,9 +1071,10 @@ def main():
                 required=False
             ),
             state=dict(
-                default='present',
+                default='replace',
                 choices=[
-                    'present',
+                    'replace',
+                    'merge',
                     'absent'
                 ],
                 required=False
@@ -1106,7 +1086,10 @@ def main():
     try:
         macospref = MacOSPref(check_mode=module.check_mode, **module.params)
         macospref.run()
-        module.exit_json(changed=macospref.changed, value=macospref.return_value)
+        if macospref.should_return_value:
+            module.exit_json(changed=macospref.changed, value=macospref.return_value)
+        else:
+            module.exit_json(changed=macospref.changed)
     except Exception as e:
         module.fail_json(msg=e.args[0])
 
